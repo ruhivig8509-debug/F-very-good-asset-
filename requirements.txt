@@ -1,0 +1,11 @@
+python-telegram-bot[all]>=20.7
+SQLAlchemy
+psycopg2-binary
+Flask
+aiohttp
+apscheduler
+Pillow
+psutil
+gTTS
+httpx
+gunicorn
