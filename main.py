@@ -40,7 +40,6 @@ from io import BytesIO
 from functools import wraps
 from collections import defaultdict
 from typing import Optional, List, Dict, Tuple, Union, Any
-from telegram.constants import ChatType
 
 # ─── Third-party imports ───
 try:
@@ -185,6 +184,9 @@ class Config:
     ALIVE_IMG = os.environ.get("ALIVE_IMG", "")
     DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "en")
 
+    # Runtime flags (not from env — set dynamically)
+    MAINTENANCE_MODE: bool = False
+
     @classmethod
     def init(cls):
         """Parse and validate config."""
@@ -293,7 +295,7 @@ class DBUser(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     def __repr__(self):
-        return f"<DBUser {self.user_id} - {self.first_name}>"
+        return f"&lt;DBUser {self.user_id} - {self.first_name}&gt;"
 
 
 class DBChat(Base):
@@ -455,7 +457,7 @@ class DBChat(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     def __repr__(self):
-        return f"<DBChat {self.chat_id} - {self.chat_title}>"
+        return f"&lt;DBChat {self.chat_id} - {self.chat_title}&gt;"
 
 
 class DBWarn(Base):
@@ -1082,6 +1084,9 @@ def create_tables():
 
 create_tables()
 
+
+# Alias for compatibility
+DBMembership = DBChatMember
 
 # ─── Database Helper Functions ───
 
@@ -2000,7 +2005,7 @@ def parse_welcome_text(
     chat: Chat,
     member_count: int = 0
 ) -> str:
-    """Replace placeholders in welcome/goodbye text."""
+    """Replace placeholders in welcome/goodbye text. Returns HTML-safe string."""
     if not text:
         return ""
 
@@ -2030,6 +2035,11 @@ def parse_welcome_text(
 
     for key, value in replacements.items():
         text = text.replace(key, value)
+
+    # ─── CRITICAL: Remove any leftover {placeholder} patterns ───
+    # These cause Telegram HTML parser to crash (e.g., {rules} → &lt;rules&gt; tag error)
+    import re as _re
+    text = _re.sub(r'\{[a-zA-Z_][a-zA-Z0-9_]*\}', '', text)
 
     return text
 
@@ -2849,7 +2859,7 @@ async def captcha_callback_handler(update: Update, context: ContextTypes.DEFAULT
 @admin_required
 @group_only
 async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set custom welcome message. Usage: /setwelcome <text>"""
+    """Set custom welcome message. Usage: /setwelcome &lt;text&gt;"""
     chat = update.effective_chat
     message = update.message
 
@@ -2893,7 +2903,7 @@ async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(
                 f"📝 {ST.bold_fancy('Set Welcome Message')}\n"
                 f"{TPL.SEPARATOR}\n\n"
-                f"✧ {ST.bold_fancy('Usage')}: /setwelcome <text>\n"
+                f"✧ {ST.bold_fancy('Usage')}: /setwelcome &lt;text&gt;\n"
                 f"✧ {ST.bold_fancy('Or reply to a message/media')}\n\n"
                 f"📋 {ST.bold_fancy('Placeholders')}:\n"
                 f"  • {{first}} - {ST.small_caps('first name')}\n"
@@ -3043,7 +3053,7 @@ async def cmd_setgoodbye(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(
                 f"📝 {ST.bold_fancy('Set Goodbye Message')}\n"
                 f"{TPL.SEPARATOR}\n\n"
-                f"✧ {ST.bold_fancy('Usage')}: /setgoodbye <text>\n"
+                f"✧ {ST.bold_fancy('Usage')}: /setgoodbye &lt;text&gt;\n"
                 f"✧ {ST.bold_fancy('Or reply to a message')}\n"
                 f"{TPL.mini_footer()}",
                 parse_mode="HTML"
@@ -3140,7 +3150,7 @@ async def cmd_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚙️ {ST.bold_fancy('Commands')}:\n"
             f"  • /captcha on/off\n"
             f"  • /captcha button/math/text\n"
-            f"  • /captchatimeout <seconds>\n"
+            f"  • /captchatimeout &lt;seconds&gt;\n"
             f"  • /captchakick on/off\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
@@ -3172,11 +3182,11 @@ async def cmd_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_captchatimeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set captcha timeout. Usage: /captchatimeout <seconds>"""
+    """Set captcha timeout. Usage: /captchatimeout &lt;seconds&gt;"""
     args = update.message.text.split()
     if len(args) < 2 or not args[1].isdigit():
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /captchatimeout <seconds>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /captchatimeout &lt;seconds&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /captchatimeout 120",
             parse_mode="HTML"
         )
@@ -3200,11 +3210,11 @@ async def cmd_captchatimeout(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @admin_required
 @group_only
 async def cmd_setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set chat rules. Usage: /setrules <rules text>"""
+    """Set chat rules. Usage: /setrules &lt;rules text&gt;"""
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"📜 {ST.bold_fancy('Usage')}: /setrules <rules text>",
+            f"📜 {ST.bold_fancy('Usage')}: /setrules &lt;rules text&gt;",
             parse_mode="HTML"
         )
         return
@@ -3222,9 +3232,10 @@ async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
 
     if chat.type == ChatType.PRIVATE:
-        # Check if callback data has chat_id
+        # In DM: show a helpful message
         await update.message.reply_text(
-            TPL.error(f"{ST.bold_fancy('Use this command in a group!')}"),
+            f"ℹ️ {ST.bold_fancy('Rules')}: Use /rules in a group chat to see that group\'s rules.\n"
+            f"✧ Set rules with: /setrules &lt;text&gt; (in a group)",
             parse_mode="HTML"
         )
         return
@@ -3384,11 +3395,11 @@ async def cmd_cleanwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_welcomedelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set welcome auto-delete time. /welcomedelete <seconds>"""
+    """Set welcome auto-delete time. /welcomedelete &lt;seconds&gt;"""
     args = update.message.text.split()
     if len(args) < 2 or not args[1].isdigit():
         await update.message.reply_text(
-            f"⏰ {ST.bold_fancy('Usage')}: /welcomedelete <seconds>\n"
+            f"⏰ {ST.bold_fancy('Usage')}: /welcomedelete &lt;seconds&gt;\n"
             f"✧ 0 = {ST.small_caps('never delete')}",
             parse_mode="HTML"
         )
@@ -3540,7 +3551,7 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"🔨 {ST.bold_fancy('Ban User')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /ban <@user/id/reply> [reason]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /ban &lt;@user/id/reply&gt; [reason]\n"
             f"✧ {ST.bold_fancy('Example')}: /ban @username spamming\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
@@ -3636,7 +3647,7 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user_id:
         await message.reply_text(
-            f"🔓 {ST.bold_fancy('Usage')}: /unban <@user/id>",
+            f"🔓 {ST.bold_fancy('Usage')}: /unban &lt;@user/id&gt;",
             parse_mode="HTML"
         )
         return
@@ -3683,7 +3694,7 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @log_action
 async def cmd_tban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Temporary ban a user.
-    Usage: /tban [user] <time> [reason]
+    Usage: /tban [user] &lt;time&gt; [reason]
     Time format: 1h, 30m, 2d, 1w
     """
     message = update.message
@@ -3696,7 +3707,7 @@ async def cmd_tban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await message.reply_text(
             f"⏱ {ST.bold_fancy('Temp Ban')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /tban <user> <time> [reason]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /tban &lt;user&gt; &lt;time&gt; [reason]\n"
             f"✧ {ST.bold_fancy('Example')}: /tban @user 1h spamming\n"
             f"✧ {ST.bold_fancy('Time')}: 30m, 1h, 2d, 1w",
             parse_mode="HTML"
@@ -3927,7 +3938,7 @@ async def cmd_baninfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, user_obj = await extract_user(update.message, context)
     if not user_id:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /baninfo <user>",
+            f"✧ {ST.bold_fancy('Usage')}: /baninfo &lt;user&gt;",
             parse_mode="HTML"
         )
         return
@@ -3992,7 +4003,7 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"🔇 {ST.bold_fancy('Mute User')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /mute <@user/id/reply> [reason]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /mute &lt;@user/id/reply&gt; [reason]\n"
             f"✧ {ST.bold_fancy('Example')}: /mute @username spamming",
             parse_mode="HTML"
         )
@@ -4076,7 +4087,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user_id:
         await message.reply_text(
-            f"🔊 {ST.bold_fancy('Usage')}: /unmute <@user/id/reply>",
+            f"🔊 {ST.bold_fancy('Usage')}: /unmute &lt;@user/id/reply&gt;",
             parse_mode="HTML"
         )
         return
@@ -4133,7 +4144,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @log_action
 async def cmd_tmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Temporary mute a user.
-    Usage: /tmute [user] <time> [reason]
+    Usage: /tmute [user] &lt;time&gt; [reason]
     """
     message = update.message
     chat = update.effective_chat
@@ -4145,7 +4156,7 @@ async def cmd_tmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await message.reply_text(
             f"⏱🔇 {ST.bold_fancy('Temp Mute')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /tmute <user> <time> [reason]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /tmute &lt;user&gt; &lt;time&gt; [reason]\n"
             f"✧ {ST.bold_fancy('Example')}: /tmute @user 1h too loud\n"
             f"✧ {ST.bold_fancy('Time')}: 30m, 1h, 2d, 1w",
             parse_mode="HTML"
@@ -4394,7 +4405,7 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"👢 {ST.bold_fancy('Kick User')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /kick <@user/id/reply> [reason]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /kick &lt;@user/id/reply&gt; [reason]\n"
             f"✧ {ST.bold_fancy('Note')}: {ST.small_caps('User can rejoin after being kicked')}",
             parse_mode="HTML"
         )
@@ -4565,7 +4576,7 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"⚠️ {ST.bold_fancy('Warn User')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /warn <@user/id/reply> [reason]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /warn &lt;@user/id/reply&gt; [reason]\n"
             f"✧ {ST.bold_fancy('Example')}: /warn @user being rude",
             parse_mode="HTML"
         )
@@ -4862,7 +4873,7 @@ async def cmd_resetwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user_id:
         await message.reply_text(
-            f"🗑 {ST.bold_fancy('Usage')}: /resetwarns <@user/id/reply>",
+            f"🗑 {ST.bold_fancy('Usage')}: /resetwarns &lt;@user/id/reply&gt;",
             parse_mode="HTML"
         )
         return
@@ -4983,7 +4994,7 @@ async def cmd_warnlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_warnaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set warn action. Usage: /warnaction <ban/kick/mute/tmute>"""
+    """Set warn action. Usage: /warnaction &lt;ban/kick/mute/tmute&gt;"""
     args = update.message.text.split()
     chat_id = update.effective_chat.id
 
@@ -5000,7 +5011,7 @@ async def cmd_warnaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{TPL.SEPARATOR}\n\n"
             f"✧ {ST.bold_fancy('Current action')}: {action}\n"
             f"✧ {ST.bold_fancy('Options')}: ban, kick, mute, tmute\n"
-            f"✧ {ST.bold_fancy('Usage')}: /warnaction <action>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /warnaction &lt;action&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -5047,7 +5058,7 @@ async def cmd_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"⬆️ {ST.bold_fancy('Promote User')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /promote <@user/id/reply> [title]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /promote &lt;@user/id/reply&gt; [title]\n"
             f"✧ {ST.bold_fancy('Example')}: /promote @user Moderator",
             parse_mode="HTML"
         )
@@ -5142,7 +5153,7 @@ async def cmd_fullpromote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await message.reply_text(
             f"⬆️⬆️ {ST.bold_fancy('Full Promote')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /fullpromote <@user/id/reply> [title]",
+            f"✧ {ST.bold_fancy('Usage')}: /fullpromote &lt;@user/id/reply&gt; [title]",
             parse_mode="HTML"
         )
         return
@@ -5231,7 +5242,7 @@ async def cmd_lowpromote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await message.reply_text(
             f"⬆️ {ST.bold_fancy('Low Promote')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /lowpromote <@user/id/reply>",
+            f"✧ {ST.bold_fancy('Usage')}: /lowpromote &lt;@user/id/reply&gt;",
             parse_mode="HTML"
         )
         return
@@ -5284,7 +5295,7 @@ async def cmd_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await message.reply_text(
             f"⬇️ {ST.bold_fancy('Demote User')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /demote <@user/id/reply>",
+            f"✧ {ST.bold_fancy('Usage')}: /demote &lt;@user/id/reply&gt;",
             parse_mode="HTML"
         )
         return
@@ -5334,7 +5345,7 @@ async def cmd_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 @bot_admin_required
 async def cmd_settitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set custom admin title. Usage: /settitle [user] <title>"""
+    """Set custom admin title. Usage: /settitle [user] &lt;title&gt;"""
     message = update.message
     args = message.text.split()
     chat = update.effective_chat
@@ -5344,7 +5355,7 @@ async def cmd_settitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await message.reply_text(
             f"🏷 {ST.bold_fancy('Set Admin Title')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /settitle <@user/reply> <title>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /settitle &lt;@user/reply&gt; &lt;title&gt;\n"
             f"✧ {ST.bold_fancy('Max length')}: 16 characters",
             parse_mode="HTML"
         )
@@ -5462,7 +5473,7 @@ async def cmd_gban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"🌍🔨 {ST.bold_fancy('Global Ban')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /gban <user> [reason]\n"
+            f"✧ {ST.bold_fancy('Usage')}: /gban &lt;user&gt; [reason]\n"
             f"✧ {ST.bold_fancy('Note')}: {ST.small_caps('This bans the user from ALL managed groups')}",
             parse_mode="HTML"
         )
@@ -5552,7 +5563,7 @@ async def cmd_ungban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, user_obj = await extract_user(update.message, context)
     if not user_id:
         await update.message.reply_text(
-            f"🌍🔓 {ST.bold_fancy('Usage')}: /ungban <user>",
+            f"🌍🔓 {ST.bold_fancy('Usage')}: /ungban &lt;user&gt;",
             parse_mode="HTML"
         )
         return
@@ -5941,7 +5952,7 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"✅ {ST.bold_fancy('Approve User')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /approve <@user/id/reply>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /approve &lt;@user/id/reply&gt;\n"
             f"✧ {ST.bold_fancy('Effect')}: {ST.small_caps('User bypasses antiflood, antilink, etc.')}",
             parse_mode="HTML"
         )
@@ -6007,7 +6018,7 @@ async def cmd_disapprove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user_id:
         await message.reply_text(
-            f"❌ {ST.bold_fancy('Usage')}: /disapprove <@user/id/reply>",
+            f"❌ {ST.bold_fancy('Usage')}: /disapprove &lt;@user/id/reply&gt;",
             parse_mode="HTML"
         )
         return
@@ -6057,7 +6068,7 @@ async def cmd_approved(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not approvals:
             await update.message.reply_text(
                 f"📋 {ST.bold_fancy('No approved users in this chat!')}\n"
-                f"✧ {ST.bold_fancy('Use')}: /approve <user> to approve someone\n"
+                f"✧ {ST.bold_fancy('Use')}: /approve &lt;user&gt; to approve someone\n"
                 f"{TPL.mini_footer()}",
                 parse_mode="HTML"
             )
@@ -6258,7 +6269,7 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
 @admin_required
 @group_only
 async def cmd_setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set a log channel for this group. Usage: /setlog <channel_id>"""
+    """Set a log channel for this group. Usage: /setlog &lt;channel_id&gt;"""
     args = update.message.text.split()
 
     if len(args) < 2:
@@ -6274,12 +6285,12 @@ async def cmd_setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📋 {ST.bold_fancy('Log Channel Settings')}\n"
             f"{TPL.SEPARATOR}\n\n"
             f"✧ {ST.bold_fancy('Current')}: {current}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /setlog <channel_id>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /setlog &lt;channel_id&gt;\n"
             f"✧ {ST.bold_fancy('Steps')}:\n"
             f"  1. Create a channel\n"
             f"  2. Add bot as admin to channel\n"
             f"  3. Forward a message from channel to get ID\n"
-            f"  4. Use /setlog <channel_id>\n"
+            f"  4. Use /setlog &lt;channel_id&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -6371,7 +6382,7 @@ async def cmd_purge(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{TPL.SEPARATOR}\n\n"
             f"✧ {ST.bold_fancy('Usage')}: Reply to a message and send /purge\n"
             f"✧ {ST.bold_fancy('Effect')}: Deletes all messages between replied and command\n"
-            f"✧ {ST.bold_fancy('Also')}: /purge <number> to purge N recent messages",
+            f"✧ {ST.bold_fancy('Also')}: /purge &lt;number&gt; to purge N recent messages",
             parse_mode="HTML"
         )
         return
@@ -6441,7 +6452,7 @@ async def cmd_purgefrom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, user_obj = await extract_user(message, context)
     if not user_id:
         await message.reply_text(
-            f"🗑 {ST.bold_fancy('Usage')}: /purgefrom <@user/reply> [count]\n"
+            f"🗑 {ST.bold_fancy('Usage')}: /purgefrom &lt;@user/reply&gt; [count]\n"
             f"✧ Default count: 100",
             parse_mode="HTML"
         )
@@ -6695,9 +6706,9 @@ async def cmd_antiflood(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"╚════════════════╝\n\n"
             f"⚙️ {ST.bold_fancy('Commands')}:\n"
             f"  • /antiflood on/off\n"
-            f"  • /setflood <number> — Set msg limit\n"
-            f"  • /setfloodtime <seconds> — Set time window\n"
-            f"  • /setfloodaction <ban/kick/mute/tmute/warn>\n"
+            f"  • /setflood &lt;number&gt; — Set msg limit\n"
+            f"  • /setfloodtime &lt;seconds&gt; — Set time window\n"
+            f"  • /setfloodaction &lt;ban/kick/mute/tmute/warn&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -7043,10 +7054,10 @@ async def cmd_antilink(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"╚════════════════╝\n\n"
             f"⚙️ {ST.bold_fancy('Commands')}:\n"
             f"  • /antilink on/off\n"
-            f"  • /setlinkaction <delete/warn/mute/ban/kick>\n"
-            f"  • /setlinkmode <all/telegram>\n"
-            f"  • /allowlink <domain>\n"
-            f"  • /disallowlink <domain>\n"
+            f"  • /setlinkaction &lt;delete/warn/mute/ban/kick&gt;\n"
+            f"  • /setlinkmode &lt;all/telegram&gt;\n"
+            f"  • /allowlink &lt;domain&gt;\n"
+            f"  • /disallowlink &lt;domain&gt;\n"
             f"  • /allowedlinks — Show allowed links\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
@@ -7104,12 +7115,12 @@ async def cmd_setlinkaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_setlinkmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set which links to detect. Usage: /setlinkmode <all/telegram>"""
+    """Set which links to detect. Usage: /setlinkmode &lt;all/telegram&gt;"""
     args = update.message.text.split()
     if len(args) < 2 or args[1].lower() not in ("all", "telegram"):
         await update.message.reply_text(
             f"🔗 {ST.bold_fancy('Set Link Mode')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /setlinkmode <all/telegram>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /setlinkmode &lt;all/telegram&gt;\n"
             f"✧ all — Block all links\n"
             f"✧ telegram — Block only Telegram links/usernames",
             parse_mode="HTML"
@@ -7131,7 +7142,7 @@ async def cmd_allowlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split()
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /allowlink <domain>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /allowlink &lt;domain&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /allowlink youtube.com",
             parse_mode="HTML"
         )
@@ -7178,7 +7189,7 @@ async def cmd_disallowlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split()
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /disallowlink <domain>",
+            f"✧ {ST.bold_fancy('Usage')}: /disallowlink &lt;domain&gt;",
             parse_mode="HTML"
         )
         return
@@ -7231,7 +7242,7 @@ async def cmd_allowedlinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed:
         await update.message.reply_text(
             f"🔗 {ST.bold_fancy('No allowed link domains!')}\n"
-            f"✧ {ST.bold_fancy('Add')}: /allowlink <domain>",
+            f"✧ {ST.bold_fancy('Add')}: /allowlink &lt;domain&gt;",
             parse_mode="HTML"
         )
         return
@@ -7274,9 +7285,9 @@ async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📝 {ST.bold_fancy('Blacklist')}\n"
                     f"{TPL.SEPARATOR}\n\n"
                     f"✧ {ST.bold_fancy('No blacklisted words!')}\n"
-                    f"✧ {ST.bold_fancy('Add')}: /blacklist <word/phrase>\n"
-                    f"✧ {ST.bold_fancy('Remove')}: /unblacklist <word>\n"
-                    f"✧ {ST.bold_fancy('Action')}: /setblaction <delete/warn/mute/ban/kick>\n"
+                    f"✧ {ST.bold_fancy('Add')}: /blacklist &lt;word/phrase&gt;\n"
+                    f"✧ {ST.bold_fancy('Remove')}: /unblacklist &lt;word&gt;\n"
+                    f"✧ {ST.bold_fancy('Action')}: /setblaction &lt;delete/warn/mute/ban/kick&gt;\n"
                     f"{TPL.mini_footer()}",
                     parse_mode="HTML"
                 )
@@ -7292,7 +7303,7 @@ async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             text += (
                 f"\n{ST.bold_fancy('Total')}: {len(blacklists)} words\n"
-                f"✧ /unblacklist <word> — Remove\n"
+                f"✧ /unblacklist &lt;word&gt; — Remove\n"
                 f"✧ /unblacklistall — Remove all\n"
                 f"{TPL.mini_footer()}"
             )
@@ -7343,7 +7354,7 @@ async def cmd_unblacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /unblacklist <word>",
+            f"✧ {ST.bold_fancy('Usage')}: /unblacklist &lt;word&gt;",
             parse_mode="HTML"
         )
         return
@@ -8436,7 +8447,7 @@ async def handle_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def format_welcome_text(text: str, user, chat) -> str:
-    """Replace placeholders in welcome/goodbye text."""
+    """Replace placeholders in welcome/goodbye text. HTML-safe output."""
     replacements = {
         "{first_name}": escape_html(user.first_name or ""),
         "{last_name}": escape_html(user.last_name or ""),
@@ -8446,14 +8457,20 @@ def format_welcome_text(text: str, user, chat) -> str:
         "{mention}": get_user_link(user),
         "{chat_title}": escape_html(chat.title or ""),
         "{chat_id}": str(chat.id),
-        "{member_count}": "N/A",  # Will be updated if possible
+        "{member_count}": "N/A",
         "{user}": get_user_link(user),
         "{chatname}": escape_html(chat.title or ""),
         "{id}": str(user.id),
+        "{first}": escape_html(user.first_name or ""),
+        "{rules}": "/rules",
     }
 
     for placeholder, value in replacements.items():
         text = text.replace(placeholder, value)
+
+    # Strip any leftover {placeholder} — prevents HTML parse crashes
+    import re as _re
+    text = _re.sub(r'\{[a-zA-Z_][a-zA-Z0-9_]*\}', '', text)
 
     return text
 
@@ -8635,7 +8652,7 @@ async def cmd_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"╚════════════════╝\n\n"
             f"⚙️ {ST.bold_fancy('Commands')}:\n"
             f"  • /welcome on/off — Toggle\n"
-            f"  • /setwelcome <text> — Set custom text\n"
+            f"  • /setwelcome &lt;text&gt; — Set custom text\n"
             f"  • /resetwelcome — Reset to default\n"
             f"  • /showwelcome — Preview current\n"
             f"  • /setwelcomemedia — Reply to photo/gif\n"
@@ -8666,7 +8683,7 @@ async def cmd_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             f"✧ {ST.bold_fancy('Use')}: /welcome on/off\n"
-            f"✧ {ST.bold_fancy('Or')}: /setwelcome <text>",
+            f"✧ {ST.bold_fancy('Or')}: /setwelcome &lt;text&gt;",
             parse_mode="HTML"
         )
 
@@ -8680,7 +8697,7 @@ async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"👋 {ST.bold_fancy('Set Welcome Message')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /setwelcome <your message>\n\n"
+            f"✧ {ST.bold_fancy('Usage')}: /setwelcome &lt;your message&gt;\n\n"
             f"📝 {ST.bold_fancy('Available Placeholders')}:\n"
             f"  {{first_name}} — User's first name\n"
             f"  {{last_name}} — User's last name\n"
@@ -8903,7 +8920,7 @@ async def cmd_goodbye(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{TPL.SEPARATOR}\n\n"
             f"✧ {ST.bold_fancy('Status')}: {'ON ✅' if enabled else 'OFF ❌'}\n"
             f"✧ /goodbye on/off\n"
-            f"✧ /setgoodbye <text>\n"
+            f"✧ /setgoodbye &lt;text&gt;\n"
             f"✧ /resetgoodbye\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
@@ -8932,7 +8949,7 @@ async def cmd_setgoodbye(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /setgoodbye <text>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /setgoodbye &lt;text&gt;\n"
             f"✧ Same placeholders as welcome: {{first_name}}, {{mention}}, etc.",
             parse_mode="HTML"
         )
@@ -8986,7 +9003,7 @@ async def cmd_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"╚════════════════╝\n\n"
             f"⚙️ {ST.bold_fancy('Commands')}:\n"
             f"  • /captcha on/off\n"
-            f"  • /captchatype <button/math>\n"
+            f"  • /captchatype &lt;button/math&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -9010,14 +9027,14 @@ async def cmd_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_captchatype(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set captcha type. Usage: /captchatype <button/math>"""
+    """Set captcha type. Usage: /captchatype &lt;button/math&gt;"""
     args = update.message.text.split()
     if len(args) < 2 or args[1].lower() not in ("button", "math"):
         await update.message.reply_text(
             f"🔒 {ST.bold_fancy('Captcha Types')}:\n"
             f"  • button — Click 'I am Human' button\n"
             f"  • math — Solve a math problem\n"
-            f"✧ {ST.bold_fancy('Usage')}: /captchatype <button/math>",
+            f"✧ {ST.bold_fancy('Usage')}: /captchatype &lt;button/math&gt;",
             parse_mode="HTML"
         )
         return
@@ -9040,7 +9057,7 @@ async def cmd_captchatype(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save a note. Usage: /save <name> <content> or reply with /save <name>"""
+    """Save a note. Usage: /save &lt;name&gt; &lt;content&gt; or reply with /save &lt;name&gt;"""
     message = update.message
     chat = update.effective_chat
     user = update.effective_user
@@ -9058,11 +9075,11 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"📝 {ST.bold_fancy('Save Note')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /save <name> <text>\n"
-            f"✧ {ST.bold_fancy('Or')}: Reply to a message with /save <name>\n"
-            f"✧ {ST.bold_fancy('Get')}: /get <name> or #name\n"
+            f"✧ {ST.bold_fancy('Usage')}: /save &lt;name&gt; &lt;text&gt;\n"
+            f"✧ {ST.bold_fancy('Or')}: Reply to a message with /save &lt;name&gt;\n"
+            f"✧ {ST.bold_fancy('Get')}: /get &lt;name&gt; or #name\n"
             f"✧ {ST.bold_fancy('List')}: /notes\n"
-            f"✧ {ST.bold_fancy('Delete')}: /clear <name>\n\n"
+            f"✧ {ST.bold_fancy('Delete')}: /clear &lt;name&gt;\n\n"
             f"📌 {ST.bold_fancy('Formatting Variables')}:\n"
             f"  • {{first}} - User first name\n"
             f"  • {{last}} - User last name\n"
@@ -9285,7 +9302,7 @@ def format_note_text(text: str, user, chat) -> str:
         "{chatname}": escape_html(chatname),
         "{mention}": mention,
         "{count}": "N/A",  # Will be replaced if possible
-        "{rules}": "/rules",
+        "{rules}": "/rules",  # HTML-safe - no angle brackets
     }
 
     result = text
@@ -9425,7 +9442,7 @@ async def send_note(chat_id: int, note, user, chat, context: ContextTypes.DEFAUL
 
 @disabled_check
 async def cmd_get(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get a saved note. Usage: /get <name> or #name"""
+    """Get a saved note. Usage: /get &lt;name&gt; or #name"""
     message = update.message
     chat = update.effective_chat
     user = update.effective_user
@@ -9440,7 +9457,7 @@ async def cmd_get(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(
                 f"📝 {ST.bold_fancy('Get Note')}\n"
                 f"{TPL.SEPARATOR}\n\n"
-                f"✧ {ST.bold_fancy('Usage')}: /get <note_name>\n"
+                f"✧ {ST.bold_fancy('Usage')}: /get &lt;note_name&gt;\n"
                 f"✧ {ST.bold_fancy('Or')}: #note_name\n"
                 f"✧ {ST.bold_fancy('List')}: /notes\n"
                 f"{TPL.mini_footer()}",
@@ -9548,7 +9565,7 @@ async def cmd_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not notes:
             await update.message.reply_text(
                 f"📝 {ST.bold_fancy('No notes saved in this chat!')}\n\n"
-                f"✧ {ST.bold_fancy('Use')}: /save <name> <text> to save a note",
+                f"✧ {ST.bold_fancy('Use')}: /save &lt;name&gt; &lt;text&gt; to save a note",
                 parse_mode="HTML"
             )
             return
@@ -9580,7 +9597,7 @@ async def cmd_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text += (
             f"\n{ST.bold_fancy('Total')}: {len(notes)} note(s)\n"
-            f"✧ {ST.bold_fancy('Get')}: /get <name> or #name\n"
+            f"✧ {ST.bold_fancy('Get')}: /get &lt;name&gt; or #name\n"
             f"{TPL.mini_footer()}"
         )
 
@@ -9652,14 +9669,14 @@ async def notes_pm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete a saved note. Usage: /clear <name>"""
+    """Delete a saved note. Usage: /clear &lt;name&gt;"""
     message = update.message
     chat = update.effective_chat
     args = message.text.split(None, 1)
 
     if len(args) < 2:
         await message.reply_text(
-            f"🗑 {ST.bold_fancy('Usage')}: /clear <note_name>\n"
+            f"🗑 {ST.bold_fancy('Usage')}: /clear &lt;note_name&gt;\n"
             f"✧ {ST.bold_fancy('Delete all')}: /clearall",
             parse_mode="HTML"
         )
@@ -9802,8 +9819,8 @@ async def cmd_privatenotes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add a custom filter/trigger. 
-    Usage: /filter <keyword> <reply text>
-    Or reply to a message with /filter <keyword>
+    Usage: /filter &lt;keyword&gt; &lt;reply text&gt;
+    Or reply to a message with /filter &lt;keyword&gt;
     """
     message = update.message
     chat = update.effective_chat
@@ -9814,10 +9831,10 @@ async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"🔍 {ST.bold_fancy('Add Filter')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /filter <keyword> <reply>\n"
-            f"✧ {ST.bold_fancy('Or')}: Reply to a message with /filter <keyword>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /filter &lt;keyword&gt; &lt;reply&gt;\n"
+            f"✧ {ST.bold_fancy('Or')}: Reply to a message with /filter &lt;keyword&gt;\n"
             f"✧ {ST.bold_fancy('List')}: /filters\n"
-            f"✧ {ST.bold_fancy('Delete')}: /stop <keyword>\n\n"
+            f"✧ {ST.bold_fancy('Delete')}: /stop &lt;keyword&gt;\n\n"
             f"📌 {ST.bold_fancy('Advanced')}:\n"
             f"  • Multiple words: /filter \"hello world\" response\n"
             f"  • With buttons: Add [text](buttonurl://link)\n"
@@ -9961,7 +9978,7 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not filters:
             await update.message.reply_text(
                 f"🔍 {ST.bold_fancy('No filters in this chat!')}\n\n"
-                f"✧ {ST.bold_fancy('Use')}: /filter <keyword> <reply>",
+                f"✧ {ST.bold_fancy('Use')}: /filter &lt;keyword&gt; &lt;reply&gt;",
                 parse_mode="HTML"
             )
             return
@@ -9986,7 +10003,7 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text += (
             f"\n{ST.bold_fancy('Total')}: {len(filters)} filter(s)\n"
-            f"✧ {ST.bold_fancy('Delete')}: /stop <keyword>\n"
+            f"✧ {ST.bold_fancy('Delete')}: /stop &lt;keyword&gt;\n"
             f"{TPL.mini_footer()}"
         )
 
@@ -9998,14 +10015,14 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a filter. Usage: /stop <keyword>"""
+    """Remove a filter. Usage: /stop &lt;keyword&gt;"""
     message = update.message
     chat = update.effective_chat
     args = message.text.split(None, 1)
 
     if len(args) < 2:
         await message.reply_text(
-            f"🗑 {ST.bold_fancy('Usage')}: /stop <keyword>\n"
+            f"🗑 {ST.bold_fancy('Usage')}: /stop &lt;keyword&gt;\n"
             f"✧ {ST.bold_fancy('Remove all')}: /stopall",
             parse_mode="HTML"
         )
@@ -10231,7 +10248,7 @@ async def filter_message_handler(update: Update, context: ContextTypes.DEFAULT_T
 @admin_required
 @group_only
 async def cmd_addcmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add a custom command. Usage: /addcmd <command> <response>
+    """Add a custom command. Usage: /addcmd &lt;command&gt; &lt;response&gt;
     The command will work as /commandname
     """
     message = update.message
@@ -10243,11 +10260,11 @@ async def cmd_addcmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"⚙️ {ST.bold_fancy('Add Custom Command')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /addcmd <command> <response>\n"
-            f"✧ {ST.bold_fancy('Or')}: Reply with /addcmd <command>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /addcmd &lt;command&gt; &lt;response&gt;\n"
+            f"✧ {ST.bold_fancy('Or')}: Reply with /addcmd &lt;command&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /addcmd hello Hello World!\n"
             f"✧ {ST.bold_fancy('List')}: /customcmds\n"
-            f"✧ {ST.bold_fancy('Delete')}: /delcmd <command>\n"
+            f"✧ {ST.bold_fancy('Delete')}: /delcmd &lt;command&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -10357,13 +10374,13 @@ async def cmd_addcmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_delcmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete a custom command. Usage: /delcmd <command>"""
+    """Delete a custom command. Usage: /delcmd &lt;command&gt;"""
     args = update.message.text.split(None, 1)
     chat = update.effective_chat
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"🗑 {ST.bold_fancy('Usage')}: /delcmd <command_name>",
+            f"🗑 {ST.bold_fancy('Usage')}: /delcmd &lt;command_name&gt;",
             parse_mode="HTML"
         )
         return
@@ -10408,7 +10425,7 @@ async def cmd_customcmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not cmds:
             await update.message.reply_text(
                 f"⚙️ {ST.bold_fancy('No custom commands!')}\n\n"
-                f"✧ {ST.bold_fancy('Add')}: /addcmd <command> <response>",
+                f"✧ {ST.bold_fancy('Add')}: /addcmd &lt;command&gt; &lt;response&gt;",
                 parse_mode="HTML"
             )
             return
@@ -10546,7 +10563,7 @@ DISABLEABLE_COMMANDS = [
 @admin_required
 @group_only
 async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Disable a command in this chat. Usage: /disable <command>"""
+    """Disable a command in this chat. Usage: /disable &lt;command&gt;"""
     args = update.message.text.split()
     chat = update.effective_chat
 
@@ -10554,8 +10571,8 @@ async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🚫 {ST.bold_fancy('Disable Command')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /disable <command>\n"
-            f"✧ {ST.bold_fancy('Enable')}: /enable <command>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /disable &lt;command&gt;\n"
+            f"✧ {ST.bold_fancy('Enable')}: /enable &lt;command&gt;\n"
             f"✧ {ST.bold_fancy('List disabled')}: /disabled\n"
             f"✧ {ST.bold_fancy('Disableable cmds')}: /disableable\n"
             f"{TPL.mini_footer()}",
@@ -10609,13 +10626,13 @@ async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Enable a disabled command. Usage: /enable <command>"""
+    """Enable a disabled command. Usage: /enable &lt;command&gt;"""
     args = update.message.text.split()
     chat = update.effective_chat
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"✅ {ST.bold_fancy('Usage')}: /enable <command>",
+            f"✅ {ST.bold_fancy('Usage')}: /enable &lt;command&gt;",
             parse_mode="HTML"
         )
         return
@@ -10675,7 +10692,7 @@ async def cmd_disabled(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text += (
             f"\n{ST.bold_fancy('Total')}: {len(disabled_cmds)}\n"
-            f"✧ {ST.bold_fancy('Enable')}: /enable <command>\n"
+            f"✧ {ST.bold_fancy('Enable')}: /enable &lt;command&gt;\n"
             f"{TPL.mini_footer()}"
         )
 
@@ -10699,7 +10716,7 @@ async def cmd_disableable(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text += (
         f"\n{ST.bold_fancy('Total')}: {len(cmds)} commands\n"
-        f"✧ {ST.bold_fancy('Disable')}: /disable <command>\n"
+        f"✧ {ST.bold_fancy('Disable')}: /disable &lt;command&gt;\n"
         f"{TPL.mini_footer()}"
     )
 
@@ -10715,7 +10732,7 @@ async def cmd_disableable(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manage blacklisted words.
     Usage: /blacklist - show list
-           /blacklist <word> - add word
+           /blacklist &lt;word&gt; - add word
     """
     message = update.message
     chat = update.effective_chat
@@ -10732,9 +10749,9 @@ async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not blacklisted:
                 await message.reply_text(
                     f"📋 {ST.bold_fancy('No blacklisted words!')}\n\n"
-                    f"✧ {ST.bold_fancy('Add')}: /blacklist <word>\n"
-                    f"✧ {ST.bold_fancy('Remove')}: /unblacklist <word>\n"
-                    f"✧ {ST.bold_fancy('Action')}: /blacklistmode <action>",
+                    f"✧ {ST.bold_fancy('Add')}: /blacklist &lt;word&gt;\n"
+                    f"✧ {ST.bold_fancy('Remove')}: /unblacklist &lt;word&gt;\n"
+                    f"✧ {ST.bold_fancy('Action')}: /blacklistmode &lt;action&gt;",
                     parse_mode="HTML"
                 )
                 return
@@ -10814,13 +10831,13 @@ async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_unblacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a word from blacklist. Usage: /unblacklist <word>"""
+    """Remove a word from blacklist. Usage: /unblacklist &lt;word&gt;"""
     args = update.message.text.split(None, 1)
     chat = update.effective_chat
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /unblacklist <word>",
+            f"✧ {ST.bold_fancy('Usage')}: /unblacklist &lt;word&gt;",
             parse_mode="HTML"
         )
         return
@@ -10854,7 +10871,7 @@ async def cmd_unblacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_blacklistmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set blacklist action. Usage: /blacklistmode <delete/warn/mute/kick/ban>"""
+    """Set blacklist action. Usage: /blacklistmode &lt;delete/warn/mute/kick/ban&gt;"""
     args = update.message.text.split()
     chat = update.effective_chat
 
@@ -10872,7 +10889,7 @@ async def cmd_blacklistmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📋 {ST.bold_fancy('Blacklist Mode')}: {action}\n"
             f"{TPL.SEPARATOR}\n\n"
             f"✧ {ST.bold_fancy('Options')}: {', '.join(valid_actions)}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /blacklistmode <action>",
+            f"✧ {ST.bold_fancy('Usage')}: /blacklistmode &lt;action&gt;",
             parse_mode="HTML"
         )
         return
@@ -11089,7 +11106,7 @@ async def blacklist_message_handler(update: Update, context: ContextTypes.DEFAUL
 @group_only
 async def cmd_blsticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Blacklist a sticker or sticker pack.
-    Usage: /blsticker <pack_name> or reply to sticker with /blsticker
+    Usage: /blsticker &lt;pack_name&gt; or reply to sticker with /blsticker
     """
     message = update.message
     chat = update.effective_chat
@@ -11109,9 +11126,9 @@ async def cmd_blsticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎨 {ST.bold_fancy('Blacklist Sticker')}\n"
             f"{TPL.SEPARATOR}\n\n"
             f"✧ {ST.bold_fancy('Usage')}: Reply to a sticker with /blsticker\n"
-            f"✧ {ST.bold_fancy('Or')}: /blsticker <pack_name>\n"
+            f"✧ {ST.bold_fancy('Or')}: /blsticker &lt;pack_name&gt;\n"
             f"✧ {ST.bold_fancy('List')}: /blstickers\n"
-            f"✧ {ST.bold_fancy('Remove')}: /unblsticker <pack>\n",
+            f"✧ {ST.bold_fancy('Remove')}: /unblsticker &lt;pack&gt;\n",
             parse_mode="HTML"
         )
         return
@@ -11172,7 +11189,7 @@ async def cmd_unblsticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         identifier = args[1].strip()
     else:
         await message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /unblsticker <pack_name> or reply to sticker",
+            f"✧ {ST.bold_fancy('Usage')}: /unblsticker &lt;pack_name&gt; or reply to sticker",
             parse_mode="HTML"
         )
         return
@@ -11298,7 +11315,7 @@ async def blacklist_sticker_handler(update: Update, context: ContextTypes.DEFAUL
 @group_only
 @bot_admin_required
 async def cmd_slowmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set slow mode. Usage: /slowmode <seconds>
+    """Set slow mode. Usage: /slowmode &lt;seconds&gt;
     0 = off, max 86400 (24h)
     """
     args = update.message.text.split()
@@ -11308,7 +11325,7 @@ async def cmd_slowmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⏳ {ST.bold_fancy('Slow Mode')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /slowmode <seconds>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /slowmode &lt;seconds&gt;\n"
             f"✧ {ST.bold_fancy('Off')}: /slowmode 0\n"
             f"✧ {ST.bold_fancy('Quick')}: /slowmode 10 / 30 / 60\n"
             f"✧ {ST.bold_fancy('Max')}: 86400 seconds (24h)",
@@ -11394,7 +11411,7 @@ LOCK_TYPES = {
 @admin_required
 @group_only
 async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lock a message type. Usage: /lock <type>"""
+    """Lock a message type. Usage: /lock &lt;type&gt;"""
     message = update.message
     chat = update.effective_chat
     args = message.text.split()
@@ -11409,8 +11426,8 @@ async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"  • <code>{lock_type}</code> - {description}\n"
 
         text += (
-            f"\n✧ {ST.bold_fancy('Usage')}: /lock <type>\n"
-            f"✧ {ST.bold_fancy('Unlock')}: /unlock <type>\n"
+            f"\n✧ {ST.bold_fancy('Usage')}: /lock &lt;type&gt;\n"
+            f"✧ {ST.bold_fancy('Unlock')}: /unlock &lt;type&gt;\n"
             f"✧ {ST.bold_fancy('List')}: /locks\n"
             f"{TPL.mini_footer()}"
         )
@@ -11482,14 +11499,14 @@ async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Unlock a message type. Usage: /unlock <type>"""
+    """Unlock a message type. Usage: /unlock &lt;type&gt;"""
     message = update.message
     chat = update.effective_chat
     args = message.text.split()
 
     if len(args) < 2:
         await message.reply_text(
-            f"🔓 {ST.bold_fancy('Usage')}: /unlock <type>\n"
+            f"🔓 {ST.bold_fancy('Usage')}: /unlock &lt;type&gt;\n"
             f"✧ {ST.bold_fancy('See types')}: /lock",
             parse_mode="HTML"
         )
@@ -11973,7 +11990,7 @@ async def cmd_purge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"🗑 {ST.bold_fancy('Usage')}: Reply to a message with /purge\n"
             f"✧ All messages from that point will be deleted\n"
-            f"✧ {ST.bold_fancy('Also')}: /purge <number> to delete last N messages",
+            f"✧ {ST.bold_fancy('Also')}: /purge &lt;number&gt; to delete last N messages",
             parse_mode="HTML"
         )
         return
@@ -12045,13 +12062,13 @@ async def cmd_spurge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 @bot_admin_required
 async def cmd_purgefrom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete N messages. Usage: /purgefrom <number>"""
+    """Delete N messages. Usage: /purgefrom &lt;number&gt;"""
     args = update.message.text.split()
     chat = update.effective_chat
 
     if len(args) < 2 or not args[1].isdigit():
         await update.message.reply_text(
-            f"🗑 {ST.bold_fancy('Usage')}: /purgefrom <number>\n"
+            f"🗑 {ST.bold_fancy('Usage')}: /purgefrom &lt;number&gt;\n"
             f"✧ Deletes last N messages",
             parse_mode="HTML"
         )
@@ -12116,7 +12133,7 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @bot_admin_required
 async def cmd_purgeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Delete all messages from a specific user (last 100).
-    Usage: reply with /purgeuser or /purgeuser <user_id>
+    Usage: reply with /purgeuser or /purgeuser &lt;user_id&gt;
     """
     message = update.message
     chat = update.effective_chat
@@ -12135,7 +12152,7 @@ async def cmd_purgeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await message.reply_text(
             f"🗑 {ST.bold_fancy('Usage')}: Reply to a user message with /purgeuser\n"
-            f"✧ {ST.bold_fancy('Or')}: /purgeuser <user_id>",
+            f"✧ {ST.bold_fancy('Or')}: /purgeuser &lt;user_id&gt;",
             parse_mode="HTML"
         )
         return
@@ -12213,7 +12230,7 @@ async def cmd_cleancmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 async def cmd_nightmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle night mode. Usage: /nightmode on/off
-    /setnighttime <start_hour> <end_hour>
+    /setnighttime &lt;start_hour&gt; &lt;end_hour&gt;
     During night mode, group is automatically locked.
     """
     args = update.message.text.split()
@@ -12237,7 +12254,7 @@ async def cmd_nightmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✧ {ST.bold_fancy('Unlock at')}: {end_hour}:00\n\n"
             f"⚙️ {ST.bold_fancy('Commands')}:\n"
             f"  • /nightmode on/off\n"
-            f"  • /setnighttime <start> <end>\n"
+            f"  • /setnighttime &lt;start&gt; &lt;end&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -12261,12 +12278,12 @@ async def cmd_nightmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_setnighttime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set night mode hours. Usage: /setnighttime <start_hour> <end_hour>"""
+    """Set night mode hours. Usage: /setnighttime &lt;start_hour&gt; &lt;end_hour&gt;"""
     args = update.message.text.split()
 
     if len(args) < 3:
         await update.message.reply_text(
-            f"🌙 {ST.bold_fancy('Usage')}: /setnighttime <start_hour> <end_hour>\n"
+            f"🌙 {ST.bold_fancy('Usage')}: /setnighttime &lt;start_hour&gt; &lt;end_hour&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /setnighttime 22 6\n"
             f"✧ Hours in 24h format (0-23)",
             parse_mode="HTML"
@@ -12364,7 +12381,7 @@ async def night_mode_job(context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_newfed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create a new federation. Usage: /newfed <name>"""
+    """Create a new federation. Usage: /newfed &lt;name&gt;"""
     user = update.effective_user
     args = update.message.text.split(None, 1)
 
@@ -12372,7 +12389,7 @@ async def cmd_newfed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🏛 {ST.bold_fancy('Create Federation')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /newfed <federation_name>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /newfed &lt;federation_name&gt;\n"
             f"✧ {ST.bold_fancy('Info')}: Federations let you ban users across multiple groups\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
@@ -12435,14 +12452,14 @@ async def cmd_newfed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_required
 @group_only
 async def cmd_joinfed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Join a federation. Usage: /joinfed <fed_id>"""
+    """Join a federation. Usage: /joinfed &lt;fed_id&gt;"""
     args = update.message.text.split()
     chat = update.effective_chat
     user = update.effective_user
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"🏛 {ST.bold_fancy('Usage')}: /joinfed <federation_id>",
+            f"🏛 {ST.bold_fancy('Usage')}: /joinfed &lt;federation_id&gt;",
             parse_mode="HTML"
         )
         return
@@ -12527,7 +12544,7 @@ async def cmd_leavefed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_fban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Federation ban. Usage: /fban <user> [reason]"""
+    """Federation ban. Usage: /fban &lt;user&gt; [reason]"""
     message = update.message
     user = update.effective_user
     chat = update.effective_chat
@@ -12536,7 +12553,7 @@ async def cmd_fban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user_id:
         await message.reply_text(
-            f"🏛🔨 {ST.bold_fancy('Usage')}: /fban <user> [reason]",
+            f"🏛🔨 {ST.bold_fancy('Usage')}: /fban &lt;user&gt; [reason]",
             parse_mode="HTML"
         )
         return
@@ -12643,7 +12660,7 @@ async def cmd_unfban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, user_obj = await extract_user(message, context)
     if not user_id:
         await message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /unfban <user>",
+            f"✧ {ST.bold_fancy('Usage')}: /unfban &lt;user&gt;",
             parse_mode="HTML"
         )
         return
@@ -12884,14 +12901,14 @@ async def cmd_fedadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_fpromote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add a federation admin. Usage: /fpromote <user>"""
+    """Add a federation admin. Usage: /fpromote &lt;user&gt;"""
     user = update.effective_user
     chat = update.effective_chat
 
     target_id, target_obj = await extract_user(update.message, context)
     if not target_id:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /fpromote <user>",
+            f"✧ {ST.bold_fancy('Usage')}: /fpromote &lt;user&gt;",
             parse_mode="HTML"
         )
         return
@@ -12953,7 +12970,7 @@ async def cmd_fdemote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_id, target_obj = await extract_user(update.message, context)
     if not target_id:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /fdemote <user>",
+            f"✧ {ST.bold_fancy('Usage')}: /fdemote &lt;user&gt;",
             parse_mode="HTML"
         )
         return
@@ -13596,7 +13613,7 @@ async def cmd_flip_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_rps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Rock Paper Scissors. Usage: /rps <rock/paper/scissors>"""
+    """Rock Paper Scissors. Usage: /rps &lt;rock/paper/scissors&gt;"""
     args = update.message.text.split()
     choices = {"rock": "🪨", "paper": "📄", "scissors": "✂️",
                "r": "🪨", "p": "📄", "s": "✂️"}
@@ -13694,13 +13711,13 @@ async def rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_8ball(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Magic 8-ball. Usage: /8ball <question>"""
+    """Magic 8-ball. Usage: /8ball &lt;question&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
             f"🎱 {ST.bold_fancy('Ask the Magic 8-Ball!')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /8ball <your question>",
+            f"✧ {ST.bold_fancy('Usage')}: /8ball &lt;your question&gt;",
             parse_mode="HTML"
         )
         return
@@ -13916,11 +13933,11 @@ async def cmd_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_reverse(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reverse text. Usage: /reverse <text> or reply"""
+    """Reverse text. Usage: /reverse &lt;text&gt; or reply"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔄 {ST.bold_fancy('Usage')}: /reverse <text>",
+            f"🔄 {ST.bold_fancy('Usage')}: /reverse &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -13938,11 +13955,11 @@ async def cmd_reverse(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_mock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """mOcKiNg SpOnGeBoB text. Usage: /mock <text> or reply"""
+    """mOcKiNg SpOnGeBoB text. Usage: /mock &lt;text&gt; or reply"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🧽 {ST.bold_fancy('Usage')}: /mock <text>",
+            f"🧽 {ST.bold_fancy('Usage')}: /mock &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -13962,11 +13979,11 @@ async def cmd_mock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_vapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """V A P O R W A V E text. Usage: /vapor <text> or reply"""
+    """V A P O R W A V E text. Usage: /vapor &lt;text&gt; or reply"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🌊 {ST.bold_fancy('Usage')}: /vapor <text>",
+            f"🌊 {ST.bold_fancy('Usage')}: /vapor &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -13980,11 +13997,11 @@ async def cmd_vapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_clap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add 👏 claps 👏 between 👏 words. Usage: /clap <text>"""
+    """Add 👏 claps 👏 between 👏 words. Usage: /clap &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"👏 {ST.bold_fancy('Usage')}: /clap <text>",
+            f"👏 {ST.bold_fancy('Usage')}: /clap &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -13995,11 +14012,11 @@ async def cmd_clap(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_tiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert text to tiny/superscript. Usage: /tiny <text>"""
+    """Convert text to tiny/superscript. Usage: /tiny &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔤 {ST.bold_fancy('Usage')}: /tiny <text>",
+            f"🔤 {ST.bold_fancy('Usage')}: /tiny &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -14025,11 +14042,11 @@ async def cmd_tiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_flip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Flip text upside down. Usage: /flip <text>"""
+    """Flip text upside down. Usage: /flip &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🙃 {ST.bold_fancy('Usage')}: /flip <text>",
+            f"🙃 {ST.bold_fancy('Usage')}: /flip &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -14134,11 +14151,11 @@ async def cmd_kaomoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_aesthetic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert text to aesthetic/fullwidth. Usage: /aesthetic <text>"""
+    """Convert text to aesthetic/fullwidth. Usage: /aesthetic &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"✨ {ST.bold_fancy('Usage')}: /aesthetic <text>",
+            f"✨ {ST.bold_fancy('Usage')}: /aesthetic &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -14158,11 +14175,11 @@ async def cmd_aesthetic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_fancy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert text to fancy font. Usage: /fancy <text>"""
+    """Convert text to fancy font. Usage: /fancy &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"✦ {ST.bold_fancy('Usage')}: /fancy <text>",
+            f"✦ {ST.bold_fancy('Usage')}: /fancy &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -14173,11 +14190,11 @@ async def cmd_fancy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_smallcaps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert text to small caps. Usage: /smallcaps <text>"""
+    """Convert text to small caps. Usage: /smallcaps &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔤 {ST.bold_fancy('Usage')}: /smallcaps <text>",
+            f"🔤 {ST.bold_fancy('Usage')}: /smallcaps &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -15185,6 +15202,109 @@ async def wordchain_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
+#  8.4B  SHIP COMMAND
+# ─────────────────────────────────────────────
+
+@disabled_check
+async def cmd_ship(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ship two users! Usage: /ship or /ship @user1 @user2"""
+    user = update.effective_user
+    msg = update.message
+
+    if msg.reply_to_message:
+        user1 = user
+        user2 = msg.reply_to_message.from_user
+    else:
+        args = msg.text.split()[1:]
+        if len(args) >= 1:
+            user1 = user
+            user2 = None
+            # Try to find second user from mention entities
+            if msg.entities:
+                for entity in msg.entities:
+                    if entity.type == "mention":
+                        uname = msg.text[entity.offset+1:entity.offset+entity.length]
+                        session = get_db()
+                        try:
+                            db_u = session.query(DBUser).filter(
+                                func.lower(DBUser.username) == uname.lower()
+                            ).first()
+                            if db_u:
+                                from telegram import User as TGUser
+                                class FakeUser:
+                                    id = db_u.user_id
+                                    first_name = db_u.first_name or uname
+                                    last_name = db_u.last_name
+                                    username = db_u.username
+                                    full_name = f"{db_u.first_name or ''} {db_u.last_name or ''}".strip() or uname
+                                user2 = FakeUser()
+                        finally:
+                            close_db(session)
+        else:
+            user1 = user
+            user2 = None
+
+    if not user2:
+        # Ship with random group member concept
+        await msg.reply_text(
+            f"💞 {ST.bold_fancy('Ship')}\n"
+            f"{TPL.SEPARATOR}\n"
+            f"✧ Reply to a message or mention someone to ship!\n"
+            f"✧ Usage: /ship @username\n"
+            f"{TPL.mini_footer()}",
+            parse_mode="HTML"
+        )
+        return
+
+    # Generate ship score
+    seed_str = f"{min(user1.id, user2.id)}{max(user1.id, user2.id)}"
+    import hashlib as _hashlib
+    score = int(_hashlib.md5(seed_str.encode()).hexdigest(), 16) % 101
+
+    # Ship name
+    name1 = (user1.first_name or "")[:len(user1.first_name or "")//2]
+    name2 = (user2.first_name or "")[len(user2.first_name or "")//2:]
+    ship_name = name1 + name2
+
+    # Bar
+    filled = int(score / 10)
+    bar = "❤️" * filled + "🖤" * (10 - filled)
+
+    if score >= 80:
+        emoji = "💕💞💕"
+        verdict = "Perfect match! Made for each other!"
+    elif score >= 60:
+        emoji = "💖"
+        verdict = "Great compatibility!"
+    elif score >= 40:
+        emoji = "💝"
+        verdict = "There's something there..."
+    elif score >= 20:
+        emoji = "💔"
+        verdict = "Hmm, maybe just friends?"
+    else:
+        emoji = "😬"
+        verdict = "Not really compatible..."
+
+    name1_safe = html.escape(user1.first_name or str(user1.id))
+    name2_safe = html.escape(user2.first_name or "User")
+
+    text = (
+        f"💞 {ST.bold_fancy('Ship Meter')} {emoji}\n"
+        f"{TPL.SEPARATOR}\n\n"
+        f"✧ {ST.bold_fancy('User 1')}: {name1_safe}\n"
+        f"✧ {ST.bold_fancy('User 2')}: {name2_safe}\n"
+        f"✧ {ST.bold_fancy('Ship Name')}: {html.escape(ship_name)}\n\n"
+        f"  {bar}\n"
+        f"  {ST.bold_fancy('Score')}: {score}%\n\n"
+        f"💬 {ST.bold_fancy(verdict)}\n"
+        f"{TPL.mini_footer()}"
+    )
+
+    await msg.reply_text(text, parse_mode="HTML")
+
+
+# ─────────────────────────────────────────────
 #  8.5  LOVE / COMPATIBILITY METER
 # ─────────────────────────────────────────────
 
@@ -15204,7 +15324,7 @@ async def cmd_love(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not target:
         await update.message.reply_text(
-            f"💕 {ST.bold_fancy('Usage')}: /love <@user> or reply to someone",
+            f"💕 {ST.bold_fancy('Usage')}: /love &lt;@user&gt; or reply to someone",
             parse_mode="HTML"
         )
         return
@@ -15258,7 +15378,7 @@ async def cmd_love(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Rate something! Usage: /rate <thing> or reply"""
+    """Rate something! Usage: /rate &lt;thing&gt; or reply"""
     text = await get_text_from_args_or_reply(update)
 
     if not text:
@@ -15943,11 +16063,11 @@ async def cmd_neko(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_anime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search anime info. Usage: /anime <name>"""
+    """Search anime info. Usage: /anime &lt;name&gt;"""
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"🎌 {ST.bold_fancy('Usage')}: /anime <anime_name>\n"
+            f"🎌 {ST.bold_fancy('Usage')}: /anime &lt;anime_name&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /anime Naruto",
             parse_mode="HTML"
         )
@@ -16054,11 +16174,11 @@ async def cmd_anime(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_manga(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search manga info. Usage: /manga <name>"""
+    """Search manga info. Usage: /manga &lt;name&gt;"""
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"📚 {ST.bold_fancy('Usage')}: /manga <manga_name>",
+            f"📚 {ST.bold_fancy('Usage')}: /manga &lt;manga_name&gt;",
             parse_mode="HTML"
         )
         return
@@ -16272,14 +16392,14 @@ async def wyr_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_poll_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quick poll creation. Usage: /poll <question> | <option1> | <option2> | ..."""
+    """Quick poll creation. Usage: /poll &lt;question&gt; | &lt;option1&gt; | &lt;option2&gt; | ..."""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
             f"📊 {ST.bold_fancy('Create Poll')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /poll <question> | <opt1> | <opt2> | ...\n"
+            f"✧ {ST.bold_fancy('Usage')}: /poll &lt;question&gt; | &lt;opt1&gt; | &lt;opt2&gt; | ...\n"
             f"✧ {ST.bold_fancy('Example')}: /poll Best fruit? | Apple | Banana | Mango\n"
             f"✧ {ST.bold_fancy('Min')}: 2 options, {ST.bold_fancy('Max')}: 10 options",
             parse_mode="HTML"
@@ -16395,6 +16515,7 @@ def register_section8_handlers(app):
     app.add_handler(CommandHandler("poll", cmd_poll_create))
 
     # ── Love / Meters ──
+    app.add_handler(CommandHandler("ship", cmd_ship))
     app.add_handler(CommandHandler("love", cmd_love))
     app.add_handler(CommandHandler("rate", cmd_rate))
     app.add_handler(CommandHandler("howgay", cmd_howgay))
@@ -16495,7 +16616,7 @@ LANGUAGE_CODES = {
 
 @disabled_check
 async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Translate text. Usage: /tr <lang> <text> or reply with /tr <lang>
+    """Translate text. Usage: /tr &lt;lang&gt; &lt;text&gt; or reply with /tr &lt;lang&gt;
     Example: /tr hi Hello World
     """
     message = update.message
@@ -16511,10 +16632,10 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"🌐 {ST.bold_fancy('Translate')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /tr <lang_code> <text>\n"
-            f"✧ {ST.bold_fancy('Reply')}: Reply to msg with /tr <lang>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /tr &lt;lang_code&gt; &lt;text&gt;\n"
+            f"✧ {ST.bold_fancy('Reply')}: Reply to msg with /tr &lt;lang&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /tr hi Hello World\n"
-            f"✧ {ST.bold_fancy('Auto detect')}: /tr en <any text>\n\n"
+            f"✧ {ST.bold_fancy('Auto detect')}: /tr en &lt;any text&gt;\n\n"
             f"📋 {ST.bold_fancy('Popular Languages')}:\n{lang_list}\n"
             f"  ... and {len(LANGUAGE_CODES) - 30} more\n"
             f"✧ {ST.bold_fancy('Full list')}: /langs\n"
@@ -16647,7 +16768,7 @@ async def cmd_langs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_tts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Text to speech. Usage: /tts [lang] <text>
+    """Text to speech. Usage: /tts [lang] &lt;text&gt;
     Example: /tts Hello World
     Example: /tts hi नमस्ते
     """
@@ -16661,8 +16782,8 @@ async def cmd_tts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text_to_speak:
             await message.reply_text(
                 f"🔊 {ST.bold_fancy('Text to Speech')}\n"
-                f"✧ {ST.bold_fancy('Usage')}: /tts <text>\n"
-                f"✧ {ST.bold_fancy('With lang')}: /tts hi <text>\n"
+                f"✧ {ST.bold_fancy('Usage')}: /tts &lt;text&gt;\n"
+                f"✧ {ST.bold_fancy('With lang')}: /tts hi &lt;text&gt;\n"
                 f"✧ {ST.bold_fancy('Reply')}: Reply to msg with /tts",
                 parse_mode="HTML"
             )
@@ -16745,13 +16866,13 @@ async def cmd_tts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_ud(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Urban Dictionary lookup. Usage: /ud <word>"""
+    """Urban Dictionary lookup. Usage: /ud &lt;word&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
             f"📖 {ST.bold_fancy('Urban Dictionary')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /ud <word or phrase>",
+            f"✧ {ST.bold_fancy('Usage')}: /ud &lt;word or phrase&gt;",
             parse_mode="HTML"
         )
         return
@@ -16836,12 +16957,12 @@ async def cmd_ud(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_define(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Dictionary definition. Usage: /define <word>"""
+    """Dictionary definition. Usage: /define &lt;word&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"📚 {ST.bold_fancy('Usage')}: /define <word>",
+            f"📚 {ST.bold_fancy('Usage')}: /define &lt;word&gt;",
             parse_mode="HTML"
         )
         return
@@ -16924,13 +17045,13 @@ async def cmd_define(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Wikipedia search. Usage: /wiki <query>"""
+    """Wikipedia search. Usage: /wiki &lt;query&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
             f"📖 {ST.bold_fancy('Wikipedia')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /wiki <search query>",
+            f"✧ {ST.bold_fancy('Usage')}: /wiki &lt;search query&gt;",
             parse_mode="HTML"
         )
         return
@@ -17048,13 +17169,13 @@ async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get weather info. Usage: /weather <city>"""
+    """Get weather info. Usage: /weather &lt;city&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
             f"🌤 {ST.bold_fancy('Weather')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /weather <city name>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /weather &lt;city name&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /weather London",
             parse_mode="HTML"
         )
@@ -17161,7 +17282,7 @@ async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_math(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Calculate math expressions. Usage: /math <expression>
+    """Calculate math expressions. Usage: /math &lt;expression&gt;
     Example: /math 2+2, /math sqrt(144), /math 5**3
     """
     args = update.message.text.split(None, 1)
@@ -17170,7 +17291,7 @@ async def cmd_math(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🧮 {ST.bold_fancy('Math Calculator')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /math <expression>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /math &lt;expression&gt;\n"
             f"✧ {ST.bold_fancy('Examples')}:\n"
             f"  • /math 2+2\n"
             f"  • /math 5**3\n"
@@ -17265,11 +17386,11 @@ def safe_math_eval(expression: str):
 
 @disabled_check
 async def cmd_base64encode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Base64 encode. Usage: /b64encode <text>"""
+    """Base64 encode. Usage: /b64encode &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔐 {ST.bold_fancy('Usage')}: /b64encode <text>",
+            f"🔐 {ST.bold_fancy('Usage')}: /b64encode &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -17288,11 +17409,11 @@ async def cmd_base64encode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_base64decode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Base64 decode. Usage: /b64decode <encoded_text>"""
+    """Base64 decode. Usage: /b64decode &lt;encoded_text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔓 {ST.bold_fancy('Usage')}: /b64decode <base64_text>",
+            f"🔓 {ST.bold_fancy('Usage')}: /b64decode &lt;base64_text&gt;",
             parse_mode="HTML"
         )
         return
@@ -17316,12 +17437,12 @@ async def cmd_base64decode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_binary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert text to binary. Usage: /bin <text>"""
+    """Convert text to binary. Usage: /bin &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"💻 {ST.bold_fancy('Usage')}: /bin <text> (text to binary)\n"
-            f"✧ {ST.bold_fancy('Reverse')}: /frombin <binary>",
+            f"💻 {ST.bold_fancy('Usage')}: /bin &lt;text&gt; (text to binary)\n"
+            f"✧ {ST.bold_fancy('Reverse')}: /frombin &lt;binary&gt;",
             parse_mode="HTML"
         )
         return
@@ -17340,11 +17461,11 @@ async def cmd_binary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_frombin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert binary to text. Usage: /frombin <binary>"""
+    """Convert binary to text. Usage: /frombin &lt;binary&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"💻 {ST.bold_fancy('Usage')}: /frombin <binary string>",
+            f"💻 {ST.bold_fancy('Usage')}: /frombin &lt;binary string&gt;",
             parse_mode="HTML"
         )
         return
@@ -17370,11 +17491,11 @@ async def cmd_frombin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_hex(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert text to hex. Usage: /hex <text>"""
+    """Convert text to hex. Usage: /hex &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔢 {ST.bold_fancy('Usage')}: /hex <text>",
+            f"🔢 {ST.bold_fancy('Usage')}: /hex &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -17393,11 +17514,11 @@ async def cmd_hex(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_fromhex(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert hex to text. Usage: /fromhex <hex_string>"""
+    """Convert hex to text. Usage: /fromhex &lt;hex_string&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔢 {ST.bold_fancy('Usage')}: /fromhex <hex_string>",
+            f"🔢 {ST.bold_fancy('Usage')}: /fromhex &lt;hex_string&gt;",
             parse_mode="HTML"
         )
         return
@@ -17423,12 +17544,12 @@ async def cmd_fromhex(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_morse(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert text to Morse code. Usage: /morse <text>"""
+    """Convert text to Morse code. Usage: /morse &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"📡 {ST.bold_fancy('Usage')}: /morse <text>\n"
-            f"✧ {ST.bold_fancy('Decode')}: /frommorse <morse_code>",
+            f"📡 {ST.bold_fancy('Usage')}: /morse &lt;text&gt;\n"
+            f"✧ {ST.bold_fancy('Decode')}: /frommorse &lt;morse_code&gt;",
             parse_mode="HTML"
         )
         return
@@ -17463,11 +17584,11 @@ async def cmd_morse(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_frommorse(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert Morse code to text. Usage: /frommorse <morse>"""
+    """Convert Morse code to text. Usage: /frommorse &lt;morse&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"📡 {ST.bold_fancy('Usage')}: /frommorse <morse_code>",
+            f"📡 {ST.bold_fancy('Usage')}: /frommorse &lt;morse_code&gt;",
             parse_mode="HTML"
         )
         return
@@ -17505,11 +17626,11 @@ async def cmd_frommorse(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate hash of text. Usage: /hash <text>"""
+    """Generate hash of text. Usage: /hash &lt;text&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"🔐 {ST.bold_fancy('Usage')}: /hash <text>",
+            f"🔐 {ST.bold_fancy('Usage')}: /hash &lt;text&gt;",
             parse_mode="HTML"
         )
         return
@@ -17540,12 +17661,12 @@ async def cmd_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_shorturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shorten a URL. Usage: /shorturl <url>"""
+    """Shorten a URL. Usage: /shorturl &lt;url&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"🔗 {ST.bold_fancy('Usage')}: /shorturl <url>",
+            f"🔗 {ST.bold_fancy('Usage')}: /shorturl &lt;url&gt;",
             parse_mode="HTML"
         )
         return
@@ -17610,11 +17731,11 @@ async def cmd_shorturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate QR code. Usage: /qr <text or url>"""
+    """Generate QR code. Usage: /qr &lt;text or url&gt;"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"📱 {ST.bold_fancy('Usage')}: /qr <text or url>",
+            f"📱 {ST.bold_fancy('Usage')}: /qr &lt;text or url&gt;",
             parse_mode="HTML"
         )
         return
@@ -17696,11 +17817,11 @@ async def cmd_readqr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Paste text to a paste service. Usage: /paste <text> or reply"""
+    """Paste text to a paste service. Usage: /paste &lt;text&gt; or reply"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"📋 {ST.bold_fancy('Usage')}: /paste <text> or reply to message",
+            f"📋 {ST.bold_fancy('Usage')}: /paste &lt;text&gt; or reply to message",
             parse_mode="HTML"
         )
         return
@@ -17768,14 +17889,14 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get GitHub user/repo info. Usage: /github <username> or /github <user/repo>"""
+    """Get GitHub user/repo info. Usage: /github &lt;username&gt; or /github &lt;user/repo&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
             f"🐙 {ST.bold_fancy('GitHub Lookup')}\n"
-            f"✧ {ST.bold_fancy('User')}: /github <username>\n"
-            f"✧ {ST.bold_fancy('Repo')}: /github <user/repo>",
+            f"✧ {ST.bold_fancy('User')}: /github &lt;username&gt;\n"
+            f"✧ {ST.bold_fancy('Repo')}: /github &lt;user/repo&gt;",
             parse_mode="HTML"
         )
         return
@@ -17954,12 +18075,12 @@ async def github_repo_lookup(update: Update, repo_path: str):
 
 @disabled_check
 async def cmd_pypi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search PyPI packages. Usage: /pypi <package_name>"""
+    """Search PyPI packages. Usage: /pypi &lt;package_name&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"🐍 {ST.bold_fancy('Usage')}: /pypi <package_name>",
+            f"🐍 {ST.bold_fancy('Usage')}: /pypi &lt;package_name&gt;",
             parse_mode="HTML"
         )
         return
@@ -18020,7 +18141,7 @@ async def cmd_pypi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Unit converter. Usage: /convert <value> <from> to <to>
+    """Unit converter. Usage: /convert &lt;value&gt; &lt;from&gt; to &lt;to&gt;
     Example: /convert 100 km to miles
     """
     args = update.message.text.split(None, 1)
@@ -18029,7 +18150,7 @@ async def cmd_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"📐 {ST.bold_fancy('Unit Converter')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /convert <value> <from> to <to>\n\n"
+            f"✧ {ST.bold_fancy('Usage')}: /convert &lt;value&gt; &lt;from&gt; to &lt;to&gt;\n\n"
             f"📋 {ST.bold_fancy('Examples')}:\n"
             f"  • /convert 100 km to miles\n"
             f"  • /convert 72 F to C\n"
@@ -18049,7 +18170,7 @@ async def cmd_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not match:
         await update.message.reply_text(
-            TPL.error(f"{ST.bold_fancy('Format: /convert <value> <from> to <to>')}"),
+            TPL.error(f"{ST.bold_fancy('Format: /convert &lt;value&gt; &lt;from&gt; to &lt;to&gt;')}"),
             parse_mode="HTML"
         )
         return
@@ -18192,7 +18313,7 @@ def temp_convert(value: float, from_u: str, to_u: str) -> float:
 
 @disabled_check
 async def cmd_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Convert currency. Usage: /currency <amount> <from> <to>
+    """Convert currency. Usage: /currency &lt;amount&gt; &lt;from&gt; &lt;to&gt;
     Example: /currency 100 USD INR
     """
     args = update.message.text.split()
@@ -18201,7 +18322,7 @@ async def cmd_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"💰 {ST.bold_fancy('Currency Converter')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /currency <amount> <from> <to>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /currency &lt;amount&gt; &lt;from&gt; &lt;to&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /currency 100 USD INR\n"
             f"✧ {ST.bold_fancy('Example')}: /currency 50 EUR GBP\n\n"
             f"📋 {ST.bold_fancy('Popular Codes')}: USD, EUR, GBP, INR,\n"
@@ -18277,12 +18398,12 @@ async def cmd_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_ip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """IP address lookup. Usage: /ip <ip_address or domain>"""
+    """IP address lookup. Usage: /ip &lt;ip_address or domain&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"🌐 {ST.bold_fancy('Usage')}: /ip <ip_address or domain>",
+            f"🌐 {ST.bold_fancy('Usage')}: /ip &lt;ip_address or domain&gt;",
             parse_mode="HTML"
         )
         return
@@ -18337,12 +18458,12 @@ async def cmd_ip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_ss(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Take a screenshot of a website. Usage: /ss <url>"""
+    """Take a screenshot of a website. Usage: /ss &lt;url&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"📸 {ST.bold_fancy('Usage')}: /ss <url>\n"
+            f"📸 {ST.bold_fancy('Usage')}: /ss &lt;url&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /ss google.com",
             parse_mode="HTML"
         )
@@ -18461,11 +18582,11 @@ async def cmd_telegraph(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Count characters, words, lines. Usage: /count <text> or reply"""
+    """Count characters, words, lines. Usage: /count &lt;text&gt; or reply"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"📊 {ST.bold_fancy('Usage')}: /count <text> or reply to a message",
+            f"📊 {ST.bold_fancy('Usage')}: /count &lt;text&gt; or reply to a message",
             parse_mode="HTML"
         )
         return
@@ -18515,11 +18636,11 @@ async def cmd_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Format/prettify JSON. Usage: /json <json_string> or reply"""
+    """Format/prettify JSON. Usage: /json &lt;json_string&gt; or reply"""
     text = await get_text_from_args_or_reply(update)
     if not text:
         await update.message.reply_text(
-            f"📋 {ST.bold_fancy('Usage')}: /json <json_string> or reply",
+            f"📋 {ST.bold_fancy('Usage')}: /json &lt;json_string&gt; or reply",
             parse_mode="HTML"
         )
         return
@@ -18577,7 +18698,7 @@ async def cmd_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text += (
             f"\n✧ {ST.bold_fancy('Timestamp')}: <code>{int(now_utc.timestamp())}</code>\n"
-            f"✧ {ST.bold_fancy('Specific')}: /time <offset> (e.g., /time +5.5)\n"
+            f"✧ {ST.bold_fancy('Specific')}: /time &lt;offset&gt; (e.g., /time +5.5)\n"
             f"{TPL.mini_footer()}"
         )
 
@@ -18624,7 +18745,7 @@ async def cmd_timestamp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✧ {ST.bold_fancy('Unix')}: <code>{ts}</code>\n"
             f"✧ {ST.bold_fancy('ISO')}: <code>{now.isoformat()}Z</code>\n"
             f"✧ {ST.bold_fancy('Human')}: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-            f"✧ {ST.bold_fancy('Convert')}: /timestamp <unix_ts>\n"
+            f"✧ {ST.bold_fancy('Convert')}: /timestamp &lt;unix_ts&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -18658,7 +18779,7 @@ async def cmd_timestamp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get color info. Usage: /color <hex> or /color <name>
+    """Get color info. Usage: /color &lt;hex&gt; or /color &lt;name&gt;
     Example: /color #FF5733 or /color red
     """
     args = update.message.text.split(None, 1)
@@ -18666,7 +18787,7 @@ async def cmd_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_text(
             f"🎨 {ST.bold_fancy('Color Info')}\n"
-            f"✧ {ST.bold_fancy('Usage')}: /color <hex_code>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /color &lt;hex_code&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /color #FF5733\n"
             f"✧ {ST.bold_fancy('Example')}: /color red",
             parse_mode="HTML"
@@ -18920,12 +19041,12 @@ async def cmd_uuid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_imdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search movie/show info. Usage: /imdb <movie name>"""
+    """Search movie/show info. Usage: /imdb &lt;movie name&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"🎬 {ST.bold_fancy('Usage')}: /imdb <movie or show name>",
+            f"🎬 {ST.bold_fancy('Usage')}: /imdb &lt;movie or show name&gt;",
             parse_mode="HTML"
         )
         return
@@ -19050,12 +19171,12 @@ async def cmd_imdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search song lyrics. Usage: /lyrics <song name>"""
+    """Search song lyrics. Usage: /lyrics &lt;song name&gt;"""
     args = update.message.text.split(None, 1)
 
     if len(args) < 2:
         await update.message.reply_text(
-            f"🎵 {ST.bold_fancy('Usage')}: /lyrics <song name>\n"
+            f"🎵 {ST.bold_fancy('Usage')}: /lyrics &lt;song name&gt;\n"
             f"✧ {ST.bold_fancy('Example')}: /lyrics Shape of You",
             parse_mode="HTML"
         )
@@ -19163,7 +19284,7 @@ async def cmd_carbon(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @disabled_check
 async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set a reminder. Usage: /remind <time> <message>
+    """Set a reminder. Usage: /remind &lt;time&gt; &lt;message&gt;
     Example: /remind 1h Check email
     Example: /remind 30m Take a break
     """
@@ -19173,7 +19294,7 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⏰ {ST.bold_fancy('Set Reminder')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /remind <time> <message>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /remind &lt;time&gt; &lt;message&gt;\n"
             f"✧ {ST.bold_fancy('Examples')}:\n"
             f"  • /remind 1h Check email\n"
             f"  • /remind 30m Take a break\n"
@@ -19475,14 +19596,14 @@ def register_section9_handlers(app):
 
 @owner_required
 async def cmd_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add a sudo user. Usage: /sudo <user_id>"""
+    """Add a sudo user. Usage: /sudo &lt;user_id&gt;"""
     args = update.message.text.split()
     if len(args) < 2:
         await update.message.reply_text(
             f"👑 {ST.bold_fancy('Sudo Management')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Add')}: /sudo <user_id>\n"
-            f"✧ {ST.bold_fancy('Remove')}: /rmsudo <user_id>\n"
+            f"✧ {ST.bold_fancy('Add')}: /sudo &lt;user_id&gt;\n"
+            f"✧ {ST.bold_fancy('Remove')}: /rmsudo &lt;user_id&gt;\n"
             f"✧ {ST.bold_fancy('List')}: /sudolist\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
@@ -19536,11 +19657,11 @@ async def cmd_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_required
 async def cmd_rmsudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a sudo user. Usage: /rmsudo <user_id>"""
+    """Remove a sudo user. Usage: /rmsudo &lt;user_id&gt;"""
     args = update.message.text.split()
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /rmsudo <user_id>",
+            f"✧ {ST.bold_fancy('Usage')}: /rmsudo &lt;user_id&gt;",
             parse_mode="HTML"
         )
         return
@@ -19611,11 +19732,11 @@ async def cmd_sudolist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_required
 async def cmd_addsupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add support user (limited sudo). Usage: /addsupport <user_id>"""
+    """Add support user (limited sudo). Usage: /addsupport &lt;user_id&gt;"""
     args = update.message.text.split()
     if len(args) < 2:
         await update.message.reply_text(
-            f"🛡 {ST.bold_fancy('Usage')}: /addsupport <user_id>",
+            f"🛡 {ST.bold_fancy('Usage')}: /addsupport &lt;user_id&gt;",
             parse_mode="HTML"
         )
         return
@@ -19712,7 +19833,7 @@ async def cmd_supportlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @sudo_required
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast message to all chats. Usage: /broadcast <message> or reply"""
+    """Broadcast message to all chats. Usage: /broadcast &lt;message&gt; or reply"""
     message = update.message
     broadcast_text = None
     broadcast_media = None
@@ -19746,11 +19867,11 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"📢 {ST.bold_fancy('Broadcast')}\n"
             f"{TPL.SEPARATOR}\n\n"
-            f"✧ {ST.bold_fancy('Usage')}: /broadcast <message>\n"
+            f"✧ {ST.bold_fancy('Usage')}: /broadcast &lt;message&gt;\n"
             f"✧ {ST.bold_fancy('Or')}: Reply to a message with /broadcast\n"
             f"✧ {ST.bold_fancy('Forward')}: /forward (forward the reply)\n"
-            f"✧ {ST.bold_fancy('Users only')}: /broadcastusers <msg>\n"
-            f"✧ {ST.bold_fancy('Groups only')}: /broadcastgroups <msg>\n"
+            f"✧ {ST.bold_fancy('Users only')}: /broadcastusers &lt;msg&gt;\n"
+            f"✧ {ST.bold_fancy('Groups only')}: /broadcastgroups &lt;msg&gt;\n"
             f"{TPL.mini_footer()}",
             parse_mode="HTML"
         )
@@ -19760,7 +19881,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_db()
     try:
         total_chats = session.query(func.count(DBChat.id)).scalar() or 0
-        total_users = session.query(func.count(DBUser.id)).scalar() or 0
+        total_users = session.query(func.count(DBUser.user_id)).scalar() or 0
     finally:
         close_db(session)
 
@@ -19962,7 +20083,7 @@ async def cmd_broadcastgroups(update: Update, context: ContextTypes.DEFAULT_TYPE
     args = update.message.text.split(None, 1)
     if len(args) < 2 and not update.message.reply_to_message:
         await update.message.reply_text(
-            f"📢 {ST.bold_fancy('Usage')}: /broadcastgroups <message>",
+            f"📢 {ST.bold_fancy('Usage')}: /broadcastgroups &lt;message&gt;",
             parse_mode="HTML"
         )
         return
@@ -20009,7 +20130,7 @@ async def cmd_broadcastusers(update: Update, context: ContextTypes.DEFAULT_TYPE)
     args = update.message.text.split(None, 1)
     if len(args) < 2 and not update.message.reply_to_message:
         await update.message.reply_text(
-            f"📢 {ST.bold_fancy('Usage')}: /broadcastusers <message>",
+            f"📢 {ST.bold_fancy('Usage')}: /broadcastusers &lt;message&gt;",
             parse_mode="HTML"
         )
         return
@@ -20059,7 +20180,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot statistics."""
     session = get_db()
     try:
-        total_users = session.query(func.count(DBUser.id)).scalar() or 0
+        total_users = session.query(func.count(DBUser.user_id)).scalar() or 0
         total_chats = session.query(func.count(DBChat.id)).scalar() or 0
         total_notes = session.query(func.count(DBNote.id)).scalar() or 0
         total_filters = session.query(func.count(DBFilter.id)).scalar() or 0
@@ -20204,7 +20325,7 @@ async def cmd_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @sudo_required
 async def cmd_shell(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Execute shell command (OWNER ONLY). Usage: /sh <command>"""
+    """Execute shell command (OWNER ONLY). Usage: /sh &lt;command&gt;"""
     if not is_owner(update.effective_user.id):
         await update.message.reply_text(
             TPL.error(f"{ST.bold_fancy('Owner only command!')}"),
@@ -20215,7 +20336,7 @@ async def cmd_shell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"💻 {ST.bold_fancy('Usage')}: /sh <command>",
+            f"💻 {ST.bold_fancy('Usage')}: /sh &lt;command&gt;",
             parse_mode="HTML"
         )
         return
@@ -20262,7 +20383,7 @@ async def cmd_shell(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @sudo_required
 async def cmd_eval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Evaluate Python expression (OWNER ONLY). Usage: /eval <expression>"""
+    """Evaluate Python expression (OWNER ONLY). Usage: /eval &lt;expression&gt;"""
     if not is_owner(update.effective_user.id):
         await update.message.reply_text(
             TPL.error(f"{ST.bold_fancy('Owner only!')}"),
@@ -20273,7 +20394,7 @@ async def cmd_eval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"🐍 {ST.bold_fancy('Usage')}: /eval <python_expression>",
+            f"🐍 {ST.bold_fancy('Usage')}: /eval &lt;python_expression&gt;",
             parse_mode="HTML"
         )
         return
@@ -20323,7 +20444,7 @@ async def cmd_exec(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"🐍 {ST.bold_fancy('Usage')}: /exec <python_code>",
+            f"🐍 {ST.bold_fancy('Usage')}: /exec &lt;python_code&gt;",
             parse_mode="HTML"
         )
         return
@@ -20379,11 +20500,11 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @sudo_required
 async def cmd_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Make bot leave a chat. Usage: /leave <chat_id>"""
+    """Make bot leave a chat. Usage: /leave &lt;chat_id&gt;"""
     args = update.message.text.split()
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /leave <chat_id>",
+            f"✧ {ST.bold_fancy('Usage')}: /leave &lt;chat_id&gt;",
             parse_mode="HTML"
         )
         return
@@ -20446,8 +20567,8 @@ async def cmd_userlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user count and recent users."""
     session = get_db()
     try:
-        total = session.query(func.count(DBUser.id)).scalar() or 0
-        recent = session.query(DBUser).order_by(DBUser.id.desc()).limit(20).all()
+        total = session.query(func.count(DBUser.user_id)).scalar() or 0
+        recent = session.query(DBUser).order_by(DBUser.user_id.desc()).limit(20).all()
 
         text = f"👥 {ST.bold_fancy('User List')}\n{TPL.SEPARATOR}\n\n"
         text += f"✧ {ST.bold_fancy('Total Users')}: {total:,}\n\n"
@@ -20574,14 +20695,14 @@ async def cmd_ip_self(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @sudo_required
 async def cmd_setbotname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Change bot name. Usage: /setbotname <name>"""
+    """Change bot name. Usage: /setbotname &lt;name&gt;"""
     if not is_owner(update.effective_user.id):
         return
 
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /setbotname <new_name>",
+            f"✧ {ST.bold_fancy('Usage')}: /setbotname &lt;new_name&gt;",
             parse_mode="HTML"
         )
         return
@@ -20601,7 +20722,7 @@ async def cmd_setbotname(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @sudo_required
 async def cmd_setbotdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set bot description. Usage: /setbotdesc <description>"""
+    """Set bot description. Usage: /setbotdesc &lt;description&gt;"""
     if not is_owner(update.effective_user.id):
         return
 
@@ -20663,11 +20784,11 @@ async def cmd_setbotpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 @bot_admin_required
 async def cmd_setchattitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set chat title. Usage: /setchattitle <title>"""
+    """Set chat title. Usage: /setchattitle &lt;title&gt;"""
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /setchattitle <new_title>",
+            f"✧ {ST.bold_fancy('Usage')}: /setchattitle &lt;new_title&gt;",
             parse_mode="HTML"
         )
         return
@@ -20689,11 +20810,11 @@ async def cmd_setchattitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 @bot_admin_required
 async def cmd_setchatdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set chat description. Usage: /setchatdesc <description>"""
+    """Set chat description. Usage: /setchatdesc &lt;description&gt;"""
     args = update.message.text.split(None, 1)
     if len(args) < 2:
         await update.message.reply_text(
-            f"✧ {ST.bold_fancy('Usage')}: /setchatdesc <description>",
+            f"✧ {ST.bold_fancy('Usage')}: /setchatdesc &lt;description&gt;",
             parse_mode="HTML"
         )
         return
@@ -20917,26 +21038,54 @@ async def cmd_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Global error handler."""
-    logger.error(f"Exception while handling an update: {context.error}")
+    """Global error handler — shows friendly message to all, details to sudo only."""
+    error_str = str(context.error)
+    logger.error(f"Exception while handling update: {error_str}", exc_info=context.error)
+
+    # Skip non-actionable errors silently
+    SILENT_ERRORS = (
+        "Query is too old",
+        "Message is not modified",
+        "Forbidden: bot was blocked",
+        "Forbidden: user is deactivated",
+        "Chat not found",
+        "User not found",
+        "Have no rights to send a message",
+        "CHAT_WRITE_FORBIDDEN",
+        "BOT_KICKED",
+        "Connection reset",
+        "timed out",
+        "getaddrinfo failed",
+    )
+    for silent in SILENT_ERRORS:
+        if silent.lower() in error_str.lower():
+            return
 
     try:
-        if update and hasattr(update, 'effective_message') and update.effective_message:
-            if "Query is too old" in str(context.error):
-                return
-            if "Message is not modified" in str(context.error):
-                return
-            if "Forbidden" in str(context.error):
-                return
+        if not update:
+            return
+        if not hasattr(update, 'effective_message') or not update.effective_message:
+            return
+        if not update.effective_user:
+            return
 
-            # Only show error to sudo users
-            if update.effective_user and is_sudo(update.effective_user.id):
-                error_text = str(context.error)[:500]
-                await update.effective_message.reply_text(
-                    f"⚠️ {ST.bold_fancy('Error occurred')}\n"
-                    f"<pre>{escape_html(error_text)}</pre>",
-                    parse_mode="HTML"
-                )
+        msg = update.effective_message
+
+        if is_sudo(update.effective_user.id):
+            # Sudo users get full error details
+            error_text = escape_html(error_str[:500])
+            await msg.reply_text(
+                f"⚠️ {ST.bold_fancy('Error occurred')}\n"
+                f"<pre>{error_text}</pre>",
+                parse_mode="HTML"
+            )
+        else:
+            # Regular users get a friendly message
+            await msg.reply_text(
+                f"⚠️ {ST.bold_fancy('Error occurred')}\n"
+                f"Something went wrong. Please try again.",
+                parse_mode="HTML"
+            )
     except Exception:
         pass
 
@@ -21640,6 +21789,194 @@ cmd_welcomemute = cmd_welcomemutenew
 cmd_setantilink = cmd_antilink
 
 
+# ═══════════════════════════════════════════════════════════════
+#  SECTION 7: WHOIS / BIO / USER LOOKUP (Missing implementations)
+# ═══════════════════════════════════════════════════════════════
+
+async def cmd_whois(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full user information lookup. Usage: /whois [reply|@user|id]"""
+    msg = update.message
+    chat = update.effective_chat
+
+    if msg.reply_to_message:
+        target = msg.reply_to_message.from_user
+    else:
+        user_id, target = await extract_user(msg, context)
+        if not user_id and not target:
+            target = update.effective_user
+            user_id = target.id
+
+    if not target:
+        await msg.reply_text(
+            TPL.error("❌ User not found. Reply to a message or provide @username / ID."),
+            parse_mode="HTML"
+        )
+        return
+
+    # Get DB info
+    session = get_db()
+    try:
+        db_user = session.query(DBUser).filter(DBUser.user_id == target.id).first()
+        db_warns_count = session.query(DBWarn).filter(
+            DBWarn.user_id == target.id,
+            DBWarn.chat_id == chat.id
+        ).count()
+        gban = session.query(DBGban).filter(
+            DBGban.user_id == target.id,
+            DBGban.is_active == True
+        ).first()
+    finally:
+        close_db(session)
+
+    # Get chat status
+    member_status = "Unknown"
+    try:
+        member = await chat.get_member(target.id)
+        status_map = {
+            ChatMemberStatus.OWNER: "👑 Owner",
+            ChatMemberStatus.ADMINISTRATOR: "🔰 Admin",
+            ChatMemberStatus.MEMBER: "👤 Member",
+            ChatMemberStatus.RESTRICTED: "🚫 Restricted",
+            ChatMemberStatus.LEFT: "🚪 Left",
+            ChatMemberStatus.BANNED: "⛔ Banned",
+        }
+        member_status = status_map.get(member.status, "Unknown")
+    except Exception:
+        pass
+
+    # Build bio
+    bio = ""
+    if db_user and db_user.bio:
+        bio = f"\n✧ {ST.bold_fancy('Bio')}: {escape_html(db_user.bio[:200])}"
+
+    # Build text
+    text = (
+        f"🔍 {ST.bold_fancy('Whois')} — Full Profile\n"
+        f"{TPL.SEPARATOR}\n"
+        f"✧ {ST.bold_fancy('Name')}: {html.escape(target.full_name)}\n"
+        f"✧ {ST.bold_fancy('ID')}: <code>{target.id}</code>\n"
+        f"✧ {ST.bold_fancy('Username')}: {'@' + target.username if target.username else 'N/A'}\n"
+        f"✧ {ST.bold_fancy('Status in Chat')}: {member_status}\n"
+        f"✧ {ST.bold_fancy('Premium')}: {'✅' if getattr(target, 'is_premium', False) else '❌'}\n"
+        f"✧ {ST.bold_fancy('Bot')}: {'✅' if target.is_bot else '❌'}\n"
+        f"✧ {ST.bold_fancy('Warns Here')}: {db_warns_count}\n"
+        f"✧ {ST.bold_fancy('GBanned')}: {'🔴 Yes' if gban else '🟢 No'}\n"
+        f"✧ {ST.bold_fancy('Total Messages')}: {format_number(getattr(db_user, 'total_messages', 0) or 0)}\n"
+        f"✧ {ST.bold_fancy('Seen')}: {time_since(getattr(db_user, 'last_seen', None)) if db_user else 'Never'}"
+        f"{bio}\n"
+        f"{TPL.mini_footer()}"
+    )
+
+    try:
+        photos = await context.bot.get_user_profile_photos(target.id, limit=1)
+        if photos.total_count > 0:
+            await msg.reply_photo(
+                photos.photos[0][-1].file_id,
+                caption=text, parse_mode="HTML"
+            )
+            return
+    except Exception:
+        pass
+
+    await msg.reply_text(text, parse_mode="HTML")
+
+
+async def cmd_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View bio of yourself or another user. Usage: /bio [reply|@user|id]"""
+    msg = update.message
+
+    if msg.reply_to_message:
+        target = msg.reply_to_message.from_user
+        target_id = target.id if target else None
+    else:
+        target_id, target = await extract_user(msg, context)
+        if not target_id:
+            target = update.effective_user
+            target_id = target.id
+
+    if not target_id:
+        await msg.reply_text(TPL.error("User not found."), parse_mode="HTML")
+        return
+
+    session = get_db()
+    try:
+        db_user = session.query(DBUser).filter(DBUser.user_id == target_id).first()
+    finally:
+        close_db(session)
+
+    bio = getattr(db_user, 'bio', None) if db_user else None
+    name = html.escape(target.first_name if target else str(target_id))
+
+    if bio:
+        text = (
+            f"📝 {ST.bold_fancy('Bio')} of {name}\n"
+            f"{TPL.SEPARATOR}\n"
+            f"{escape_html(bio)}\n"
+            f"{TPL.mini_footer()}"
+        )
+    else:
+        text = (
+            f"📝 {ST.bold_fancy('Bio')} of {name}\n"
+            f"{TPL.SEPARATOR}\n"
+            f"ℹ️ No bio set yet.\n"
+            f"Use /setbio &lt;text&gt; to set yours!\n"
+            f"{TPL.mini_footer()}"
+        )
+
+    await msg.reply_text(text, parse_mode="HTML")
+
+
+async def cmd_setbio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set your bio. Usage: /setbio &lt;text&gt;"""
+    msg = update.message
+    user = update.effective_user
+
+    args = msg.text.split(None, 1)
+    if len(args) < 2:
+        await msg.reply_text(
+            f"ℹ️ {ST.bold_fancy('Usage')}: /setbio &lt;your bio text&gt;\n"
+            f"✧ Max 200 characters.\n"
+            f"✧ Use /bio to view your bio.",
+            parse_mode="HTML"
+        )
+        return
+
+    bio_text = args[1].strip()
+    if len(bio_text) > 200:
+        await msg.reply_text(
+            TPL.error(f"Bio too long! Max 200 chars. You wrote {len(bio_text)}."),
+            parse_mode="HTML"
+        )
+        return
+
+    session = get_db()
+    try:
+        db_user = session.query(DBUser).filter(DBUser.user_id == user.id).first()
+        if db_user:
+            db_user.bio = bio_text
+        else:
+            db_user = DBUser(
+                user_id=user.id,
+                first_name=user.first_name,
+                username=user.username,
+                bio=bio_text
+            )
+            session.add(db_user)
+        session.commit()
+        await msg.reply_text(
+            f"✅ {ST.bold_fancy('Bio updated!')}\n"
+            f"✧ {escape_html(bio_text)}\n"
+            f"{TPL.mini_footer()}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        session.rollback()
+        logger.error(f"setbio error: {e}")
+        await msg.reply_text(TPL.error("Failed to set bio. Try again."), parse_mode="HTML")
+    finally:
+        close_db(session)
+
+
 def main():
     """Main entry point - initialize bot and run."""
     logger.info("=" * 60)
@@ -21697,6 +22034,12 @@ def main():
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("setrules", cmd_setrules))
     app.add_handler(CommandHandler("clearrules", cmd_clearrules))
+
+    # ── Section 3 Extra: Whois / Bio / User Info ──
+    app.add_handler(CommandHandler("whois", cmd_whois))
+    app.add_handler(CommandHandler("bio", cmd_bio))
+    app.add_handler(CommandHandler("setbio", cmd_setbio))
+    app.add_handler(CommandHandler("getbio", cmd_bio))
 
     # Section 3 callbacks
     app.add_handler(CallbackQueryHandler(help_callback, pattern=r"^help_"))
