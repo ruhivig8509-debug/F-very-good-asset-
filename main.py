@@ -40,6 +40,7 @@ from io import BytesIO
 from functools import wraps
 from collections import defaultdict
 from typing import Optional, List, Dict, Tuple, Union, Any
+from telegram.constants import ChatType
 
 # ─── Third-party imports ───
 try:
